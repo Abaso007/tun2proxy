@@ -8,9 +8,9 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     conn, addr = s.accept()
     with conn:
         while True:
-            data = conn.recv(1024)
-            if not data:
+            if data := conn.recv(1024):
+                print(data.decode())
+            else:
                 break
-            print(data.decode())
         time.sleep(3)
         conn.sendall('This will still be received by the client that has closed its write end'.encode())

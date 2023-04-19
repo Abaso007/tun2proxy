@@ -7,9 +7,9 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     port = int(port)
     s.connect((ip, port))
     while True:
-        data = s.recv(1024)
-        if not data:
+        if data := s.recv(1024):
+            print(data.decode())
+        else:
             break
-        print(data.decode())
     time.sleep(3)
     s.sendall('Message after server write end close'.encode())

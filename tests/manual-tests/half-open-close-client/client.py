@@ -9,7 +9,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     s.sendall('I am closing the write end, but I can still receive data'.encode())
     s.shutdown(socket.SHUT_WR)
     while True:
-        data = s.recv(1024)
-        if not data:
+        if data := s.recv(1024):
+            print(data.decode())
+        else:
             break
-        print(data.decode())
