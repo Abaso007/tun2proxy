@@ -1,22 +1,19 @@
 use crate::{
-    error::Error,
-    tun2proxy::{
-        ConnectionInfo, ConnectionManager, Direction, IncomingDataEvent, IncomingDirection, OutgoingDataEvent, OutgoingDirection,
-        ProxyHandler,
-    },
+    directions::{IncomingDataEvent, IncomingDirection, OutgoingDataEvent, OutgoingDirection},
+    error::{Error, Result},
+    proxy_handler::{ProxyHandler, ProxyHandlerManager},
+    session_info::{IpProtocol, SessionInfo},
 };
-use base64::Engine;
 use httparse::Response;
-use smoltcp::wire::IpProtocol;
 use socks5_impl::protocol::UserKey;
 use std::{
-    cell::RefCell,
     collections::{hash_map::RandomState, HashMap, VecDeque},
     iter::FromIterator,
     net::SocketAddr,
-    rc::Rc,
     str,
+    sync::Arc,
 };
+use tokio::sync::Mutex;
 use unicase::UniCase;
 
 #[derive(Eq, PartialEq, Debug)]
@@ -40,6 +37,7 @@ enum HttpState {
 pub(crate) type DigestState = digest_auth::WwwAuthenticateHeader;
 
 pub struct HttpConnection {
+    server_addr: SocketAddr,
     state: HttpState,
     client_inbuf: VecDeque<u8>,
     server_inbuf: VecDeque<u8>,
@@ -48,10 +46,11 @@ pub struct HttpConnection {
     crlf_state: u8,
     counter: usize,
     skip: usize,
-    digest_state: Rc<RefCell<Option<DigestState>>>,
+    digest_state: Arc<Mutex<Option<DigestState>>>,
     before: bool,
     credentials: Option<UserKey>,
-    info: ConnectionInfo,
+    info: SessionInfo,
+    domain_name: Option<String>,
 }
 
 static PROXY_AUTHENTICATE: &str = "Proxy-Authenticate";
@@ -61,8 +60,15 @@ static TRANSFER_ENCODING: &str = "Transfer-Encoding";
 static CONTENT_LENGTH: &str = "Content-Length";
 
 impl HttpConnection {
-    fn new(info: &ConnectionInfo, credentials: Option<UserKey>, digest_state: Rc<RefCell<Option<DigestState>>>) -> Result<Self, Error> {
+    async fn new(
+        server_addr: SocketAddr,
+        info: SessionInfo,
+        domain_name: Option<String>,
+        credentials: Option<UserKey>,
+        digest_state: Arc<Mutex<Option<DigestState>>>,
+    ) -> Result<Self> {
         let mut res = Self {
+            server_addr,
             state: HttpState::ExpectResponseHeaders,
             client_inbuf: VecDeque::default(),
             server_inbuf: VecDeque::default(),
@@ -74,38 +80,50 @@ impl HttpConnection {
             digest_state,
             before: false,
             credentials,
-            info: info.clone(),
+            info,
+            domain_name,
         };
 
-        res.send_tunnel_request()?;
+        res.send_tunnel_request().await?;
         Ok(res)
     }
 
-    fn send_tunnel_request(&mut self) -> Result<(), Error> {
+    async fn send_tunnel_request(&mut self) -> Result<(), Error> {
+        let host = if let Some(domain_name) = &self.domain_name {
+            format!("{}:{}", domain_name, self.info.dst.port())
+        } else {
+            self.info.dst.to_string()
+        };
+
         self.server_outbuf.extend(b"CONNECT ");
-        self.server_outbuf.extend(self.info.dst.to_string().as_bytes());
+        self.server_outbuf.extend(host.as_bytes());
         self.server_outbuf.extend(b" HTTP/1.1\r\nHost: ");
-        self.server_outbuf.extend(self.info.dst.to_string().as_bytes());
+        self.server_outbuf.extend(host.as_bytes());
         self.server_outbuf.extend(b"\r\n");
 
-        self.send_auth_data(if self.digest_state.borrow().is_none() {
+        let scheme = if self.digest_state.lock().await.is_none() {
             AuthenticationScheme::Basic
         } else {
             AuthenticationScheme::Digest
-        })?;
+        };
+        self.send_auth_data(scheme).await?;
 
         self.server_outbuf.extend(b"\r\n");
         Ok(())
     }
 
-    fn send_auth_data(&mut self, scheme: AuthenticationScheme) -> Result<(), Error> {
+    async fn send_auth_data(&mut self, scheme: AuthenticationScheme) -> Result<()> {
         let Some(credentials) = &self.credentials else {
             return Ok(());
         };
 
         match scheme {
             AuthenticationScheme::Digest => {
-                let uri = self.info.dst.to_string();
+                let uri = if let Some(domain_name) = &self.domain_name {
+                    format!("{}:{}", domain_name, self.info.dst.port())
+                } else {
+                    self.info.dst.to_string()
+                };
 
                 let context = digest_auth::AuthContext::new_with_method(
                     &credentials.username,
@@ -115,15 +133,14 @@ impl HttpConnection {
                     digest_auth::HttpMethod::CONNECT,
                 );
 
-                let mut state = self.digest_state.borrow_mut();
-                let response = state.as_mut().unwrap().respond(&context)?;
+                let mut state = self.digest_state.lock().await;
+                let response = state.as_mut().unwrap().respond(&context).unwrap();
 
                 self.server_outbuf
                     .extend(format!("{}: {}\r\n", PROXY_AUTHORIZATION, response.to_header_string()).as_bytes());
             }
             AuthenticationScheme::Basic => {
-                let cred = format!("{}:{}", credentials.username, credentials.password);
-                let auth_b64 = base64::engine::general_purpose::STANDARD.encode(cred);
+                let auth_b64 = base64easy::encode(credentials.to_string(), base64easy::EngineKind::Standard);
                 self.server_outbuf
                     .extend(format!("{}: Basic {}\r\n", PROXY_AUTHORIZATION, auth_b64).as_bytes());
             }
@@ -133,7 +150,7 @@ impl HttpConnection {
         Ok(())
     }
 
-    fn state_change(&mut self) -> Result<(), Error> {
+    async fn state_change(&mut self) -> Result<()> {
         match self.state {
             HttpState::ExpectResponseHeaders => {
                 while self.counter < self.server_inbuf.len() {
@@ -155,6 +172,8 @@ impl HttpConnection {
                     return Ok(());
                 }
 
+                let header_size = self.counter;
+
                 self.counter = 0;
                 self.crlf_state = 0;
 
@@ -175,8 +194,10 @@ impl HttpConnection {
                 if status_code == 200 {
                     // Connection successful
                     self.state = HttpState::Established;
-                    self.server_inbuf.clear();
-                    return self.state_change();
+                    // The server may have sent a banner already (SMTP, SSH, etc.).
+                    // Therefore, server_inbuf must retain this data.
+                    self.server_inbuf.drain(0..header_size);
+                    return Box::pin(self.state_change()).await;
                 }
 
                 if status_code != 407 {
@@ -209,7 +230,7 @@ impl HttpConnection {
                 }
 
                 // Update the digest state
-                self.digest_state.replace(Some(state));
+                self.digest_state.lock().await.replace(state);
                 self.before = true;
 
                 let closed = match headers_map.get(&UniCase::new(CONNECTION)) {
@@ -222,18 +243,18 @@ impl HttpConnection {
                     // Reset all the buffers
                     self.server_inbuf.clear();
                     self.server_outbuf.clear();
-                    self.send_tunnel_request()?;
+                    self.send_tunnel_request().await?;
 
                     self.state = HttpState::Reset;
                     return Ok(());
                 }
 
                 // The HTTP/1.1 expected to be keep alive waiting for the next frame so, we must
-                // compute the lenght of the response in order to detect the next frame (response)
+                // compute the length of the response in order to detect the next frame (response)
                 // [RFC-9112](https://datatracker.ietf.org/doc/html/rfc9112#body.content-length)
 
                 // Transfer-Encoding isn't supported yet
-                if headers_map.get(&UniCase::new(TRANSFER_ENCODING)).is_some() {
+                if headers_map.contains_key(&UniCase::new(TRANSFER_ENCODING)) {
                     unimplemented!("Header Transfer-Encoding not supported");
                 }
 
@@ -260,7 +281,7 @@ impl HttpConnection {
                         // Close the connection by information miss
                         self.server_inbuf.clear();
                         self.server_outbuf.clear();
-                        self.send_tunnel_request()?;
+                        self.send_tunnel_request().await?;
 
                         self.state = HttpState::Reset;
                         return Ok(());
@@ -271,7 +292,7 @@ impl HttpConnection {
                 self.state = HttpState::ExpectResponse;
                 self.skip = content_length + len;
 
-                return self.state_change();
+                return Box::pin(self.state_change()).await;
             }
             HttpState::ExpectResponse => {
                 if self.skip > 0 {
@@ -285,10 +306,10 @@ impl HttpConnection {
 
                     // self.server_outbuf.append(&mut self.data_buf);
                     // self.data_buf.clear();
-                    self.send_tunnel_request()?;
+                    self.send_tunnel_request().await?;
                     self.state = HttpState::ExpectResponseHeaders;
 
-                    return self.state_change();
+                    return Box::pin(self.state_change()).await;
                 }
             }
             HttpState::Established => {
@@ -299,7 +320,7 @@ impl HttpConnection {
             }
             HttpState::Reset => {
                 self.state = HttpState::ExpectResponseHeaders;
-                return self.state_change();
+                return Box::pin(self.state_change()).await;
             }
             _ => {}
         }
@@ -307,12 +328,21 @@ impl HttpConnection {
     }
 }
 
+#[async_trait::async_trait]
 impl ProxyHandler for HttpConnection {
-    fn get_connection_info(&self) -> &ConnectionInfo {
-        &self.info
+    fn get_server_addr(&self) -> SocketAddr {
+        self.server_addr
     }
 
-    fn push_data(&mut self, event: IncomingDataEvent<'_>) -> Result<(), Error> {
+    fn get_session_info(&self) -> SessionInfo {
+        self.info
+    }
+
+    fn get_domain_name(&self) -> Option<String> {
+        self.domain_name.clone()
+    }
+
+    async fn push_data(&mut self, event: IncomingDataEvent<'_>) -> std::io::Result<()> {
         let direction = event.direction;
         let buffer = event.buffer;
         match direction {
@@ -324,7 +354,8 @@ impl ProxyHandler for HttpConnection {
             }
         }
 
-        self.state_change()
+        self.state_change().await?;
+        Ok(())
     }
 
     fn consume_data(&mut self, dir: OutgoingDirection, size: usize) {
@@ -352,16 +383,10 @@ impl ProxyHandler for HttpConnection {
         self.state == HttpState::Established
     }
 
-    fn data_len(&self, dir: Direction) -> usize {
+    fn data_len(&self, dir: OutgoingDirection) -> usize {
         match dir {
-            Direction::Incoming(incoming) => match incoming {
-                IncomingDirection::FromServer => self.server_inbuf.len(),
-                IncomingDirection::FromClient => self.client_inbuf.len(),
-            },
-            Direction::Outgoing(outgoing) => match outgoing {
-                OutgoingDirection::ToServer => self.server_outbuf.len(),
-                OutgoingDirection::ToClient => self.client_outbuf.len(),
-            },
+            OutgoingDirection::ToServer => self.server_outbuf.len(),
+            OutgoingDirection::ToClient => self.client_outbuf.len(),
         }
     }
 
@@ -377,23 +402,23 @@ impl ProxyHandler for HttpConnection {
 pub(crate) struct HttpManager {
     server: SocketAddr,
     credentials: Option<UserKey>,
-    digest_state: Rc<RefCell<Option<DigestState>>>,
+    digest_state: Arc<Mutex<Option<DigestState>>>,
 }
 
-impl ConnectionManager for HttpManager {
-    fn new_proxy_handler(&self, info: &ConnectionInfo, _: bool) -> Result<Box<dyn ProxyHandler>, Error> {
+#[async_trait::async_trait]
+impl ProxyHandlerManager for HttpManager {
+    async fn new_proxy_handler(
+        &self,
+        info: SessionInfo,
+        domain_name: Option<String>,
+        _udp_associate: bool,
+    ) -> std::io::Result<Arc<Mutex<dyn ProxyHandler>>> {
         if info.protocol != IpProtocol::Tcp {
-            return Err("Invalid protocol".into());
+            return Err(Error::from("Protocol not supported by HTTP proxy").into());
         }
-        Ok(Box::new(HttpConnection::new(
-            info,
-            self.credentials.clone(),
-            self.digest_state.clone(),
-        )?))
-    }
-
-    fn get_server_addr(&self) -> SocketAddr {
-        self.server
+        Ok(Arc::new(Mutex::new(
+            HttpConnection::new(self.server, info, domain_name, self.credentials.clone(), self.digest_state.clone()).await?,
+        )))
     }
 }
 
@@ -402,7 +427,7 @@ impl HttpManager {
         Self {
             server,
             credentials,
-            digest_state: Rc::new(RefCell::new(None)),
+            digest_state: Arc::new(Mutex::new(None)),
         }
     }
 }

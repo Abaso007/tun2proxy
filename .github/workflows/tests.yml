@@ -20,26 +20,28 @@ jobs:
           profile: minimal
           toolchain: stable
           override: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --no-run
       - name: Populate .env
         env:
           DOTENV: ${{ secrets.DOTENV }}
         run: echo "$DOTENV" > .env
-      - name: Set up runner SSH key
-        run: >-
-          set -o allexport &&
-          source .env &&
-          set +o allexport &&
-          mkdir ~/.ssh &&
-          echo "$TEST_SERVER_PRIVATE_SSH_KEY" > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.x'
+      
+      - name: Create virtual environment
+        run: python -m venv venv
+      
+      - name: Activate virtual environment and install dependencies
+        run: |
+          source venv/bin/activate
+          pip install -r tests/requirements.txt
+      
+      - name: Build project
+        run: cargo build --release
+      
       - name: Run tests
-        run: >-
-          set -o allexport &&
-          source .env &&
-          set +o allexport &&
-          ssh -N -oStrictHostKeyChecking=no -oUserKnownHostsFile=/dev/null -D 1080 "$TEST_SERVER_SSH_DST" &
-          while ! nc -z 127.0.0.1 1080; do sleep 1; done &&
-          sudo -E /home/runner/.cargo/bin/cargo test
+        run: |
+          source venv/bin/activate
+          python tests/tests.py

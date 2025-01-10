@@ -1,15 +1,12 @@
-#![allow(dead_code)]
-
 use crate::error::Result;
 use hashlink::{linked_hash_map::RawEntryMut, LruCache};
-use smoltcp::wire::Ipv4Cidr;
 use std::{
     collections::HashMap,
-    convert::{TryFrom, TryInto},
+    convert::TryInto,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    str::FromStr,
     time::{Duration, Instant},
 };
+use tproxy_config::IpCidr;
 
 const MAPPING_TIMEOUT: u64 = 60; // Mapping timeout in seconds
 
@@ -18,7 +15,11 @@ struct NameCacheEntry {
     expiry: Instant,
 }
 
+/// A virtual DNS server which allocates IP addresses to clients.
+/// The IP addresses are in the range of private IP addresses.
+/// The DNS server is implemented as a LRU cache.
 pub struct VirtualDns {
+    trailing_dot: bool,
     lru_cache: LruCache<IpAddr, NameCacheEntry>,
     name_to_ip: HashMap<String, IpAddr>,
     network_addr: IpAddr,
@@ -26,33 +27,26 @@ pub struct VirtualDns {
     next_addr: IpAddr,
 }
 
-impl Default for VirtualDns {
-    fn default() -> Self {
-        let start_addr = Ipv4Addr::from_str("198.18.0.0").unwrap();
-        let cidr = Ipv4Cidr::new(start_addr.into(), 15);
-
+impl VirtualDns {
+    pub fn new(ip_pool: IpCidr) -> Self {
         Self {
-            next_addr: start_addr.into(),
+            trailing_dot: false,
+            next_addr: ip_pool.first_address(),
             name_to_ip: HashMap::default(),
-            network_addr: IpAddr::try_from(cidr.network().address().into_address()).unwrap(),
-            broadcast_addr: IpAddr::try_from(cidr.broadcast().unwrap().into_address()).unwrap(),
+            network_addr: ip_pool.first_address(),
+            broadcast_addr: ip_pool.last_address(),
             lru_cache: LruCache::new_unbounded(),
         }
     }
-}
 
-impl VirtualDns {
-    pub fn new() -> Self {
-        VirtualDns::default()
-    }
-
-    pub fn receive_query(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+    /// Returns the DNS response to send back to the client.
+    pub fn generate_query(&mut self, data: &[u8]) -> Result<(Vec<u8>, String, IpAddr)> {
         use crate::dns;
         let message = dns::parse_data_to_dns_message(data, false)?;
         let qname = dns::extract_domain_from_dns_message(&message)?;
-        let ip = self.allocate_ip(qname.clone())?;
+        let ip = self.find_or_allocate_ip(qname.clone())?;
         let message = dns::build_dns_response(message, &qname, ip, 5)?;
-        Ok(message.to_vec()?)
+        Ok((message.to_vec()?, qname, ip))
     }
 
     fn increment_ip(addr: IpAddr) -> Result<IpAddr> {
@@ -96,36 +90,50 @@ impl VirtualDns {
         self.lru_cache.get(addr).map(|entry| &entry.name)
     }
 
-    fn allocate_ip(&mut self, name: String) -> Result<IpAddr> {
+    fn find_or_allocate_ip(&mut self, name: String) -> Result<IpAddr> {
+        // This function is a search and creation function.
+        // Thus, it is sufficient to canonicalize the name here.
+        let insert_name = if name.ends_with('.') && !self.trailing_dot {
+            String::from(name.trim_end_matches('.'))
+        } else {
+            name
+        };
+
         let now = Instant::now();
 
+        // Iterate through all entries of the LRU cache and remove those that have expired.
         loop {
             let (ip, entry) = match self.lru_cache.iter().next() {
                 None => break,
                 Some((ip, entry)) => (ip, entry),
             };
+
+            // The entry has expired.
             if now > entry.expiry {
                 let name = entry.name.clone();
                 self.lru_cache.remove(&ip.clone());
                 self.name_to_ip.remove(&name);
-                continue;
+                continue; // There might be another expired entry after this one.
             }
-            break;
+
+            break; // The entry has not expired and all following entries are newer.
         }
 
-        if let Some(ip) = self.name_to_ip.get(&name) {
+        // Return the IP if it is stored inside our LRU cache.
+        if let Some(ip) = self.name_to_ip.get(&insert_name) {
             let ip = *ip;
             self.touch_ip(&ip);
             return Ok(ip);
         }
 
+        // Otherwise, store name and IP pair inside the LRU cache.
         let started_at = self.next_addr;
 
         loop {
             if let RawEntryMut::Vacant(vacant) = self.lru_cache.raw_entry_mut().from_key(&self.next_addr) {
                 let expiry = Instant::now() + Duration::from_secs(MAPPING_TIMEOUT);
-                let name0 = name.clone();
-                vacant.insert(self.next_addr, NameCacheEntry { name, expiry });
+                let name0 = insert_name.clone();
+                vacant.insert(self.next_addr, NameCacheEntry { name: insert_name, expiry });
                 self.name_to_ip.insert(name0, self.next_addr);
                 return Ok(self.next_addr);
             }

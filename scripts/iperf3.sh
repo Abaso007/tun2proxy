@@ -8,7 +8,7 @@ echo $SCRIPT_DIR
 
 netns="test"
 dante="danted"
-tun2proxy="${SCRIPT_DIR}/../../target/release/tun2proxy-bin"
+tun2proxy="${SCRIPT_DIR}/../target/release/tun2proxy-bin"
 
 ip netns add "$netns"
 
@@ -39,12 +39,16 @@ sleep 1
 ip tuntap add name tun0 mode tun
 ip link set tun0 up
 ip route add 10.0.0.4 dev tun0
-"$tun2proxy" --proxy socks5://10.0.0.3:10800 &
+"$tun2proxy" --tun tun0 --proxy socks5://10.0.0.3:10800 -v off &
+
+sleep 3
 
 # Run iperf client through tun2proxy
-iperf3 -c 10.0.0.4
+iperf3 -c 10.0.0.4 -P 10 -R
 
-iperf3 -c 10.0.0.4 -R -P 10
+sleep 3
+
+iperf3 -c 10.0.0.4 -P 10
 
 # Clean up
 # sudo sh -c "pkill tun2proxy-bin; pkill iperf3; pkill danted; ip link del tun0; ip netns del test"

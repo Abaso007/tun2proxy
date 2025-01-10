@@ -1,66 +1,81 @@
 [package]
-authors = ["B. Blechschmidt", "ssrlive"]
-edition = "2021"
 name = "tun2proxy"
-version = "0.1.12"
+version = "0.7.3"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/tun2proxy/tun2proxy"
+homepage = "https://github.com/tun2proxy/tun2proxy"
+authors = ["B. Blechschmidt", "ssrlive"]
+description = "Tunnel interface to proxy"
+readme = "README.md"
+rust-version = "1.80"
 
 [lib]
-crate-type = ["cdylib", "lib"]
+crate-type = ["staticlib", "cdylib", "lib"]
+
+[[bin]]
+name = "tun2proxy-bin"
+path = "src/bin/main.rs"
+
+[[bin]]
+name = "udpgw-server"
+path = "src/bin/udpgw_server.rs"
+required-features = ["udpgw"]
+
+[features]
+default = ["udpgw"]
+udpgw = []
 
 [dependencies]
-base64 = { version = "0.21" }
-clap = { version = "4.4", features = ["derive"] }
-ctrlc2 = { version = "3.5", features = ["termination"] }
+async-trait = "0.1"
+base64easy = "0.1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive", "wrap_help", "color"] }
+ctrlc2 = { version = "3", features = ["tokio", "termination"] }
 digest_auth = "0.3"
 dotenvy = "0.15"
-env_logger = "0.10"
-hashlink = "0.8"
-httparse = "1.8"
-libc = "0.2"
-log = "0.4"
-mio = { version = "0.8", features = ["os-poll", "net", "os-ext"] }
-nix = { version = "0.27", features = [
-    "process",
-    "signal",
-    "fs",
-    "mount",
-    "user",
+env_logger = "0.11"
+hashlink = "0.10"
+hickory-proto = "0.24"
+httparse = "1"
+ipstack = { version = "0.1" }
+log = { version = "0.4", features = ["std"] }
+mimalloc = { version = "0.1", default-features = false, optional = true }
+percent-encoding = "2"
+shlex = "1.3.0"
+socks5-impl = { version = "0.6", default-features = false, features = [
+    "tokio",
 ] }
-prctl = "1.0"
-smoltcp = { version = "0.10", features = ["std", "phy-tuntap_interface"] }
-socks5-impl = { version = "0.5", default-features = false }
-thiserror = "1.0"
-trust-dns-proto = "0.23"
-unicase = "2.7"
-url = "2.4"
-
-[target.'cfg(target_family="unix")'.dependencies]
-fork = "0.1"
-
-[target.'cfg(target_os="android")'.dependencies]
-android_logger = "0.13"
-jni = { version = "0.21", default-features = false }
-
-[dev-dependencies]
-ctor = "0.2"
-reqwest = { version = "0.11", default-features = false, features = [
-    "blocking",
-    "json",
-    "rustls-tls",
-] }
-serial_test = "2.0"
-test-log = "0.2"
-
-[target.'cfg(target_os="windows")'.dependencies]
-rand = "0.8"
-windows = { version = "0.51", features = [
-    "Win32_Storage_FileSystem",
-    "Win32_NetworkManagement_IpHelper",
-    "Win32_NetworkManagement_Ndis",
-    "Win32_Networking_WinSock",
-    "Win32_Foundation",
-] }
-wintun = { git = "https://github.com/ssrlive/wintun.git", branch = "main" }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+tproxy-config = { version = "6", default-features = false }
+tun = { version = "0.7", features = ["async"] }
+udp-stream = { version = "0.0.12", default-features = false }
+unicase = "2"
+url = "2"
 
 [build-dependencies]
-serde_json = "1.0"
+serde_json = "1"
+
+[target.'cfg(target_os="linux")'.dependencies]
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+
+[target.'cfg(target_os="android")'.dependencies]
+android_logger = "0.14"
+jni = { version = "0.21", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+daemonize = "0.5"
+nix = { version = "0.29", default-features = false, features = [
+    "fs",
+    "socket",
+    "uio",
+] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-service = "0.7"
+
+[profile.release]
+strip = "symbols"

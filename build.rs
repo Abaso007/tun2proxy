@@ -5,8 +5,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         use std::io::Write;
         f.write_all(format!("CARGO_TARGET_DIR: '{}'\r\n", cargo_target_dir.display()).as_bytes())?;
 
-        // The wintun crate's root directory
-        let crate_dir = get_crate_dir("wintun")?;
+        // The wintun-bindings crate's root directory
+        let crate_dir = get_crate_dir("wintun-bindings")?;
 
         // The path to the DLL file, relative to the crate root, depending on the target architecture
         let dll_path = get_wintun_bin_relative_path()?;
@@ -22,6 +22,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             f.write_all(format!("Failed to copy 'wintun.dll': {}\r\n", e).as_bytes())?;
         } else {
             f.write_all(format!("Copied 'wintun.dll' to '{}'\r\n", dst_path.display()).as_bytes())?;
+
+            // Set the modified time to the current time, or the publishing process will fail.
+            let file = std::fs::OpenOptions::new().write(true).open(&dst_path)?;
+            file.set_modified(std::time::SystemTime::now())?;
         }
     }
     Ok(())
@@ -43,19 +47,18 @@ fn get_cargo_target_dir() -> Result<std::path::PathBuf, Box<dyn std::error::Erro
     Ok(target_dir.ok_or("not found")?.to_path_buf())
 }
 
-#[cfg(target_os = "windows")]
+#[allow(dead_code)]
 fn get_wintun_bin_relative_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    let dll_path = if cfg!(target_arch = "x86") {
-        "wintun/bin/x86/wintun.dll"
-    } else if cfg!(target_arch = "x86_64") {
-        "wintun/bin/amd64/wintun.dll"
-    } else if cfg!(target_arch = "arm") {
-        "wintun/bin/arm/wintun.dll"
-    } else if cfg!(target_arch = "aarch64") {
-        "wintun/bin/arm64/wintun.dll"
-    } else {
-        return Err("Unsupported architecture".into());
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH")?;
+
+    let dll_path = match target_arch.as_str() {
+        "x86" => "wintun/bin/x86/wintun.dll",
+        "x86_64" => "wintun/bin/amd64/wintun.dll",
+        "arm" => "wintun/bin/arm/wintun.dll",
+        "aarch64" => "wintun/bin/arm64/wintun.dll",
+        _ => return Err("Unsupported architecture".into()),
     };
+
     Ok(dll_path.into())
 }
 
