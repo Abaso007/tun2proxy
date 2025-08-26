@@ -7,6 +7,7 @@ use crate::{
     session_info::{IpProtocol, SessionInfo},
     virtual_dns::VirtualDns,
 };
+pub use clap::ValueEnum;
 use ipstack::{IpStackStream, IpStackTcpStream, IpStackUdpStream};
 use proxy_handler::{ProxyHandler, ProxyHandlerManager};
 use socks::SocksProxyManager;
