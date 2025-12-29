@@ -233,7 +233,7 @@ where
     };
 
     let mut ipstack_config = ipstack::IpStackConfig::default();
-    ipstack_config.mtu(mtu);
+    ipstack_config.mtu(mtu)?;
     let mut tcp_cfg = ipstack::TcpConfig::default();
     tcp_cfg.timeout = std::time::Duration::from_secs(args.tcp_timeout);
     ipstack_config.with_tcp_config(tcp_cfg);
