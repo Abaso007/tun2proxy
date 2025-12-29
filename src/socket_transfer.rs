@@ -196,11 +196,15 @@ where
 /// Process [`Request`]s received from `socket`
 ///
 /// Panics if called outside of tokio runtime
-pub async fn process_socket_requests(socket: &UnixDatagram) -> error::Result<()> {
+pub async fn process_socket_requests(socket: &UnixDatagram, shutdown_token: tokio_util::sync::CancellationToken) -> error::Result<()> {
+    log::info!("socket_transfer: process_socket_requests started");
     loop {
         let mut buf = [0_u8; REQUEST_BUFFER_SIZE];
 
-        let len = socket.recv(&mut buf[..]).await?;
+        let len = tokio::select! {
+            _ = shutdown_token.cancelled() => break,
+            res = socket.recv(&mut buf[..]) => res?,
+        };
 
         let request: Request = bincode::decode_from_slice(&buf[..len], bincode::config::standard())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
@@ -239,4 +243,6 @@ pub async fn process_socket_requests(socket: &UnixDatagram) -> error::Result<()>
 
         sendmsg::<()>(socket.as_raw_fd(), &iov, &[cmsg], MsgFlags::empty(), None)?;
     }
+    log::info!("socket_transfer: process_socket_requests exiting");
+    Ok(())
 }

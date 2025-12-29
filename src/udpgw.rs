@@ -456,9 +456,14 @@ impl UdpGwClient {
     }
 
     /// Heartbeat task asynchronous function to periodically check and maintain the active state of the server connection.
-    pub(crate) async fn heartbeat_task(&self) -> std::io::Result<()> {
+    pub(crate) async fn heartbeat_task(&self, shutdown_token: tokio_util::sync::CancellationToken) -> std::io::Result<()> {
+        log::info!("udpgw: heartbeat task started");
         loop {
-            sleep(self.keepalive_time).await;
+            tokio::select! {
+                _ = shutdown_token.cancelled() => break,
+                _ = sleep(self.keepalive_time) => {}
+            };
+
             let mut streams = Vec::new();
 
             while let Some(stream) = self.pop_server_connection_from_queue().await {
@@ -506,6 +511,8 @@ impl UdpGwClient {
             }
             crate::traffic_status::traffic_status_update(tx, rx)?;
         }
+        log::info!("udpgw: heartbeat task exiting");
+        Ok(())
     }
 
     /// Parses the UDP response data.

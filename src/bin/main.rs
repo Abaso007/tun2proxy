@@ -111,7 +111,7 @@ async fn main_async(args: Args) -> Result<(), BoxError> {
 #[cfg(target_os = "linux")]
 async fn namespace_proxy_main(
     _args: Args,
-    _shutdown_token: tokio_util::sync::CancellationToken,
+    shutdown_token: tokio_util::sync::CancellationToken,
 ) -> Result<std::process::ExitStatus, tun2proxy::Error> {
     use nix::fcntl::{OFlag, open};
     use nix::sys::stat::Mode;
@@ -153,7 +153,11 @@ async fn namespace_proxy_main(
         log::info!("Writing unshare pid to {pidfile}");
         std::fs::write(pidfile, unshare_pid.to_string()).ok();
     }
-    tokio::spawn(async move { tun2proxy::socket_transfer::process_socket_requests(&socket).await });
+    tokio::spawn(async move {
+        if let Err(err) = tun2proxy::socket_transfer::process_socket_requests(&socket, shutdown_token).await {
+            log::error!("namespace proxy socket request handler error: {err}");
+        }
+    });
 
     Ok(child.wait().await?)
 }

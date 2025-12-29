@@ -253,8 +253,11 @@ where
             addr,
         ));
         let client_keepalive = client.clone();
+        let shutdown_clone = shutdown_token.clone();
         tokio::spawn(async move {
-            let _ = client_keepalive.heartbeat_task().await;
+            if let Err(err) = client_keepalive.heartbeat_task(shutdown_clone).await {
+                log::error!("UDP Gateway heartbeat task error: {err}");
+            }
         });
         client
     });
