@@ -664,7 +664,7 @@ async fn handle_udp_associate_session(
 
                 if let ProxyType::Socks4 | ProxyType::Socks5 = proxy_type {
                     let s5addr = if let Some(domain_name) = &domain_name {
-                        Address::DomainAddress(domain_name.clone(), session_info.dst.port())
+                        Address::DomainAddress(domain_name.clone().into(), session_info.dst.port())
                     } else {
                         session_info.dst.into()
                     };

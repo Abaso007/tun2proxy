@@ -200,7 +200,7 @@ impl SocksProxyImpl {
         let addr = if self.command == protocol::Command::UdpAssociate {
             Address::unspecified()
         } else if let Some(domain_name) = &self.domain_name {
-            Address::DomainAddress(domain_name.clone(), self.info.dst.port())
+            Address::DomainAddress(domain_name.clone().into(), self.info.dst.port())
         } else {
             self.info.dst.into()
         };
